@@ -43,11 +43,10 @@ MCP Runtime Layer
    ├── algorand-mcp SERVER (@goplausible/algorand-mcp, 125+ tools)
    └── algorand-remote-mcp-lite (Wallet Edition — OAuth/OIDC + signing)
        ↓
-Backend (FastAPI — Render / Railway / AWS)
-   ├── Auth middleware (self-hosted email OTP via SendGrid/Resend)
-   ├── Guardrails (spending limits, KYT blocklist, reputation)
-   ├── Tx builder (AlgoKit — atomic groups)
-   ├── Monetize SDK (x402 paywall middleware for developers)
+Backend (Express.js / Hono — TypeScript — Render / Railway / AWS)
+   ├── Auth middleware (email OTP / OAuth)
+   ├── Guardrails (spending limits, reputation, KYT)
+   ├── Tx builder (AlgoKit TS — atomic groups)
    └── Signing Service → Intermezzo (self-hosted, Docker + Vault)
                   ↓ (REST calls, OAuth2 tokens)
 On-Chain Layer
@@ -74,11 +73,11 @@ Ecosystem Services (all ✅ live)
 
 **Problem:** GoPlausible's dOAuth protocol exists but has no confirmed public email+OTP REST endpoint.
 
-**Solution:** Self-hosted auth in FastAPI backend. This is actually MORE production-grade because you control the entire flow.
+**Solution:** Self-hosted auth in the Express/Hono TypeScript backend. This is actually MORE production-grade because you control the entire flow.
 
 ```
 User → `algopay auth login <email>`
-  → FastAPI Backend sends OTP via SendGrid/Resend/Mailgun
+  → Express Backend sends OTP via SendGrid/Resend/Mailgun
   → User → `algopay auth verify <flowId> <otp>`
   → Backend validates OTP
   → Backend exchanges for Intermezzo OAuth2 session token
@@ -88,7 +87,7 @@ User → `algopay auth login <email>`
 
 **Implementation:**
 - **OTP delivery:** SendGrid (free tier: 100 emails/day) or Resend
-- **OTP storage:** Redis with 10-minute TTL
+- **OTP storage:** Redis with 10-minute TTL (or in-memory Map for dev)
 - **Session tokens:** JWT signed by backend, 30-day validity
 - **Flow IDs:** UUID v4, single-use
 
@@ -201,7 +200,7 @@ response = await intermezzo_client.sign_transaction(unsigned_tx, session_context
 | Build time | VibeKit (`npx vibekit init`) | Local |
 | CLI | TypeScript, published to npm | User's machine |
 | MCP Runtime | algorand-mcp + algorand-remote-mcp-lite | Co-located with CLI |
-| Backend | FastAPI (Python) | Render / Railway / AWS |
+| Backend | Express.js / Hono (TypeScript) | Render / Railway / AWS |
 | Signing | Intermezzo (Docker + Vault) | Self-hosted VPS or AWS |
 | Dashboard | React | Vercel |
 | Session store | Redis | Render Redis / AWS ElastiCache |
