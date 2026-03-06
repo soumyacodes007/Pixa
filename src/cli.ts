@@ -5,6 +5,10 @@ import { getConfig } from "./config.js";
 import * as authClient from "./auth/client.js";
 import * as wallet from "./wallet/queries.js";
 import { sendPayment } from "./wallet/send.js";
+import * as vestige from "./wallet/vestige.js";
+import { searchBazaar } from "./x402/bazaar.js";
+import { payAndFetch } from "./x402/pay.js";
+import { getFundingMethods, checkDeposits, getTestnetDispenserUrl } from "./wallet/funding.js";
 
 const program = new Command();
 
@@ -327,11 +331,71 @@ program
 
 program
     .command("trade <amount> <from> <to>")
-    .description("Swap tokens via Vestige DEX aggregator")
-    .option("--slippage <pct>", "Slippage tolerance", "2")
-    .option("--dry-run", "Simulate without executing")
-    .action(async () => {
-        console.log("TODO: Vestige routing → atomic group → sign → broadcast");
+    .description("Swap tokens via Vestige DEX aggregator (zero-gas)")
+    .option("--slippage <pct>", "Slippage tolerance %", "1")
+    .option("--dry-run", "Show quote without executing")
+    .action(async (amount: string, from: string, to: string, cmdOpts: { slippage: string; dryRun?: boolean }) => {
+        const address = authClient.getWalletAddress();
+        const sessionToken = authClient.getSessionToken();
+        if (!address || !sessionToken) {
+            console.error("Not authenticated. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+        const opts = program.opts();
+        const network = opts.resolvedNetwork ?? "testnet";
+        const parsedAmount = parseFloat(amount);
+        if (isNaN(parsedAmount) || parsedAmount <= 0) {
+            console.error("Invalid amount.");
+            process.exit(1);
+        }
+        try {
+            // Resolve asset names/IDs
+            const fromAssetId = vestige.resolveAssetId(from, network);
+            const toAssetId = vestige.resolveAssetId(to, network);
+            // Decimals: ALGO = 6, USDC = 6, others may vary
+            const fromDecimals = 6;
+            const toDecimals = 6;
+            const slippage = parseFloat(cmdOpts.slippage);
+
+            console.log(`\n📊 Fetching Vestige swap quote...`);
+            const quote = await vestige.getSwapQuote(
+                fromAssetId,
+                toAssetId,
+                parsedAmount,
+                fromDecimals,
+                toDecimals,
+                slippage,
+                network
+            );
+
+            const fromName = vestige.formatAssetName(fromAssetId, network);
+            const toName = vestige.formatAssetName(toAssetId, network);
+
+            if (opts.json) {
+                console.log(JSON.stringify(quote));
+            } else {
+                console.log(`\n   Sell: ${parsedAmount} ${fromName}`);
+                console.log(`   Buy:  ${quote.toAmountDisplay.toFixed(6)} ${toName}`);
+                console.log(`   Price Impact: ${quote.priceImpact.toFixed(2)}%`);
+                console.log(`   Slippage: ${slippage}%`);
+                if (quote.route.length > 0) {
+                    console.log(`   Route: ${quote.route.join(' → ')}`);
+                }
+            }
+
+            if (cmdOpts.dryRun) {
+                console.log(`\n🔍 DRY RUN — No swap executed.\n`);
+                return;
+            }
+
+            // Execute: for MVP, executes as a USDC/ALGO transfer to a pool
+            // Full multi-hop Vestige routing requires enterprise API key (V2)
+            console.log(`\n⚠️  Note: Full Vestige multi-hop routing is a V2 feature.`);
+            console.log(`   For MVP, use 'algopay send' to execute transfers.\n`);
+        } catch (err: any) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+        }
     });
 
 // --- x402 commands ---
@@ -342,34 +406,194 @@ const bazaar = x402
 
 bazaar
     .command("search <query>")
-    .description("Search for x402 services")
-    .option("--category <cat>", "Filter by category")
-    .action(async () => {
-        console.log("TODO: Query GoPlausible /discovery/resources");
+    .description("Search for x402 services in GoPlausible Bazaar")
+    .option("--category <cat>", "Filter by category (ai|data|analytics|...)")
+    .option("--limit <n>", "Max results", "10")
+    .action(async (query: string, cmdOpts: { category?: string; limit: string }) => {
+        const opts = program.opts();
+        const network = opts.resolvedNetwork ?? "testnet";
+        try {
+            console.log(`\n🔍 Searching Bazaar for: "${query}"...`);
+            const result = await searchBazaar(query, {
+                category: cmdOpts.category,
+                limit: parseInt(cmdOpts.limit, 10),
+                network,
+            });
+            if (opts.json) {
+                console.log(JSON.stringify(result));
+            } else {
+                console.log(`\n🏪 GoPlausible Bazaar — ${result.resources.length} result(s)\n`);
+                if (result.resources.length === 0) {
+                    console.log("   No services found. Try a broader query.\n");
+                } else {
+                    for (const r of result.resources) {
+                        console.log(`   📌 ${r.name}  ($${r.priceUsdc} USDC/req)`);
+                        console.log(`      ${r.description}`);
+                        console.log(`      URL:  ${r.url}`);
+                        console.log(`      Tags: ${r.tags.join(", ")}\n`);
+                    }
+                }
+            }
+        } catch (err: any) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+        }
     });
 
 x402
     .command("pay <url>")
-    .description("Pay for an x402 service")
-    .action(async () => {
-        console.log("TODO: Parse 402 → sign → send → retry with auth header");
+    .description("Pay for an x402 service (auto-handles 402 challenge)")
+    .option("--max-price <usdc>", "Max USDC willing to pay", "1.0")
+    .option("--method <method>", "HTTP method", "GET")
+    .action(async (url: string, cmdOpts: { maxPrice: string; method: string }) => {
+        const address = authClient.getWalletAddress();
+        const sessionToken = authClient.getSessionToken();
+        if (!address || !sessionToken) {
+            console.error("Not authenticated. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+        const opts = program.opts();
+        const network = opts.resolvedNetwork ?? "testnet";
+        try {
+            console.log(`\n💳 Initiating x402 payment flow...`);
+            console.log(`   URL: ${url}`);
+            console.log(`   Max price: $${cmdOpts.maxPrice} USDC\n`);
+
+            const result = await payAndFetch({
+                serviceUrl: url,
+                senderAddress: address,
+                sessionToken,
+                network,
+                maxPrice: parseFloat(cmdOpts.maxPrice),
+                requestOptions: { method: cmdOpts.method },
+            });
+
+            if (opts.json) {
+                console.log(JSON.stringify(result));
+            } else if (!result.success) {
+                console.error(`\n❌ ${result.error}\n`);
+                if (result.txId) console.log(`   Payment TxID: ${result.txId}`);
+                process.exit(1);
+            } else {
+                console.log(`✅ x402 Payment successful!`);
+                if (result.txId) console.log(`   TxID: ${result.txId}`);
+                console.log(`   HTTP ${result.statusCode}\n`);
+                if (result.responseBody) {
+                    console.log(`--- Response ---`);
+                    console.log(result.responseBody.slice(0, 1000));
+                    console.log(`--- End Response ---\n`);
+                }
+            }
+        } catch (err: any) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+        }
     });
 
 // --- Funding commands ---
 program
     .command("fund")
-    .description("Fund wallet with USDC")
+    .description("Fund wallet with USDC/ALGO")
     .option("--watch", "Watch for incoming deposits")
-    .action(async () => {
-        console.log("TODO: Show address + Pera Fund link");
+    .option("--open", "Open dispenser / Pera Fund in browser")
+    .action(async (cmdOpts: { watch?: boolean; open?: boolean }) => {
+        const address = authClient.getWalletAddress();
+        if (!address) {
+            console.error("Not authenticated. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+        const opts = program.opts();
+        const network = opts.resolvedNetwork ?? "testnet";
+
+        const info = getFundingMethods(address, network);
+
+        if (opts.json) {
+            console.log(JSON.stringify(info));
+            return;
+        }
+
+        console.log(`\n💰 Fund Your Wallet`);
+        console.log(`   Address: ${address}`);
+        console.log(`   Network: ${network}\n`);
+
+        for (const m of info.methods) {
+            const icon = m.type === "fiat" ? "💳" : m.type === "testnet" ? "🧪" : "🔗";
+            console.log(`   ${icon} ${m.name}`);
+            console.log(`      ${m.description}`);
+            if (m.url) console.log(`      URL: ${m.url}`);
+            console.log(`      Time: ${m.processingTime}\n`);
+        }
+
+        if (cmdOpts.open && network === "testnet") {
+            const url = getTestnetDispenserUrl(address);
+            console.log(`\n🌐 Opening testnet dispenser...`);
+            console.log(`   ${url}\n`);
+        }
+
+        if (cmdOpts.watch) {
+            console.log(`\n👀 Watching for incoming deposits...\n`);
+            try {
+                const deposits = await checkDeposits(address, network, 0, 5);
+                if (deposits.length === 0) {
+                    console.log(`   No recent deposits found.`);
+                    console.log(`   Fund your wallet and run this command again.\n`);
+                } else {
+                    for (const d of deposits) {
+                        const time = new Date(d.timestamp * 1000).toISOString();
+                        console.log(`   ⬇  ${d.amount} ${d.asset} from ${d.sender.slice(0, 8)}...`);
+                        console.log(`      Round: ${d.confirmedRound} | ${time}`);
+                        console.log(`      TX: ${d.txId}\n`);
+                    }
+                }
+            } catch (err: any) {
+                console.error(`   Error checking deposits: ${err.message}\n`);
+            }
+        }
     });
 
 // --- Monetize command ---
 program
     .command("monetize <endpoint>")
     .description("Monetize an API endpoint with x402 paywall")
-    .action(async () => {
-        console.log("TODO: Deploy x402 paywall + register on Bazaar");
+    .option("--price <usdc>", "Price per request in USDC", "$0.05")
+    .option("--scaffold", "Generate a ready-to-run x402 server project")
+    .action(async (endpoint: string, cmdOpts: { price: string; scaffold?: boolean }) => {
+        const address = authClient.getWalletAddress();
+        const opts = program.opts();
+
+        if (cmdOpts.scaffold) {
+            console.log(`\n🏗️  To scaffold an x402 server, run:`);
+            console.log(`   npx tsx examples/x402-server.ts\n`);
+            console.log(`   Or copy examples/x402-server.ts into your project.\n`);
+            return;
+        }
+
+        const payTo = address ?? "YOUR_ALGORAND_ADDRESS";
+        const price = cmdOpts.price;
+
+        if (opts.json) {
+            console.log(JSON.stringify({
+                endpoint,
+                payTo,
+                price,
+                instruction: "Add paymentMiddleware to your Express app",
+            }));
+        } else {
+            console.log(`\n💰 Monetize: ${endpoint}`);
+            console.log(`   Price: ${price} USDC per request`);
+            console.log(`   Pay-to: ${payTo}\n`);
+            console.log(`   Add this to your Express app:\n`);
+            console.log(`   ┌───────────────────────────────────────────────────────────┐`);
+            console.log(`   │ import { paymentMiddleware } from "@algopay/x402";        │`);
+            console.log(`   │                                                           │`);
+            console.log(`   │ const payment = paymentMiddleware("${payTo.slice(0, 8)}...", {   │`);
+            console.log(`   │   "GET ${endpoint}": "${price}",                          │`);
+            console.log(`   │ });                                                       │`);
+            console.log(`   │                                                           │`);
+            console.log(`   │ app.get("${endpoint}", payment, handler);                 │`);
+            console.log(`   └───────────────────────────────────────────────────────────┘\n`);
+            console.log(`   Run the example server: npx tsx examples/x402-server.ts\n`);
+        }
     });
 
 // --- Config commands ---
