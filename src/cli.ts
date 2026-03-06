@@ -4,6 +4,7 @@ import { Command } from "commander";
 import { getConfig } from "./config.js";
 import * as authClient from "./auth/client.js";
 import * as wallet from "./wallet/queries.js";
+import { sendPayment } from "./wallet/send.js";
 
 const program = new Command();
 
@@ -226,12 +227,102 @@ program
 // --- Transaction commands ---
 program
     .command("send <amount> <recipient>")
-    .description("Send USDC or other assets")
-    .option("--asset <id>", "Asset ID or name", "USDC")
-    .option("--dry-run", "Simulate without executing")
-    .option("--limit <amount>", "One-time spending limit")
-    .action(async () => {
-        console.log("TODO: Build atomic group → Intermezzo sign → broadcast");
+    .description("Send ALGO or USDC (zero-gas via fee pooling)")
+    .option("--asset <name>", "Asset to send: ALGO or USDC", "USDC")
+    .option("--dry-run", "Simulate without broadcasting")
+    .action(async (amount: string, recipient: string, cmdOpts: { asset: string; dryRun?: boolean }) => {
+        const address = authClient.getWalletAddress();
+        const sessionToken = authClient.getSessionToken();
+        if (!address || !sessionToken) {
+            console.error("Not authenticated. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+        const opts = program.opts();
+        const network = opts.resolvedNetwork ?? "testnet";
+        const parsedAmount = parseFloat(amount);
+        if (isNaN(parsedAmount) || parsedAmount <= 0) {
+            console.error("Invalid amount. Must be a positive number.");
+            process.exit(1);
+        }
+        const asset = cmdOpts.asset.toUpperCase() as "ALGO" | "USDC";
+        if (asset !== "ALGO" && asset !== "USDC") {
+            console.error(`Unsupported asset "${cmdOpts.asset}". Use ALGO or USDC.`);
+            process.exit(1);
+        }
+        try {
+            if (!cmdOpts.dryRun) {
+                console.log(`\n🔐 Running guardrail checks...`);
+            }
+            const result = await sendPayment({
+                senderAddress: address,
+                recipientAddress: recipient,
+                amount: parsedAmount,
+                asset,
+                network,
+                sessionToken,
+                dryRun: cmdOpts.dryRun,
+            });
+            if (opts.json) {
+                console.log(JSON.stringify(result));
+            } else if (!result.success) {
+                console.error(`\n❌ ${result.error}\n`);
+                process.exit(1);
+            } else if (result.dryRun) {
+                console.log(`\n🔍 DRY RUN — Transaction not broadcast`);
+                console.log(`   Would send: ${parsedAmount} ${asset} to ${recipient}`);
+                console.log(`   Estimated fee: ${result.fee} microALGO (paid by Algopay)\n`);
+            } else {
+                console.log(`\n✅ Sent ${parsedAmount} ${asset}!`);
+                console.log(`   To:    ${recipient}`);
+                console.log(`   TxID:  ${result.txId}`);
+                console.log(`   Round: ${result.confirmedRound}`);
+                console.log(`   Fee:   Paid by Algopay (zero cost to you)\n`);
+            }
+        } catch (err: any) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+        }
+    });
+
+// --- Spending Limits command ---
+program
+    .command("limits")
+    .description("View or set spending limits")
+    .option("--set <amount>", "Set spending limit amount")
+    .option("--period <period>", "Period: hourly|daily|weekly|monthly", "daily")
+    .option("--clear", "Remove spending limit")
+    .action((cmdOpts: { set?: string; period: string; clear?: boolean }) => {
+        const config = getConfig();
+        const opts = program.opts();
+        if (cmdOpts.clear) {
+            config.set("spendingLimits", null);
+            console.log("Spending limits cleared.");
+            return;
+        }
+        if (cmdOpts.set) {
+            const amount = parseFloat(cmdOpts.set);
+            if (isNaN(amount) || amount <= 0) {
+                console.error("Invalid limit amount.");
+                process.exit(1);
+            }
+            const period = cmdOpts.period as "hourly" | "daily" | "weekly" | "monthly";
+            config.set("spendingLimits", { amount, period });
+            if (opts.json) {
+                console.log(JSON.stringify({ spendingLimit: { amount, period } }));
+            } else {
+                console.log(`✅ Spending limit set: ${amount} USDC (${period})`);
+            }
+            return;
+        }
+        // Show current limits
+        const limits = config.get("spendingLimits");
+        if (opts.json) {
+            console.log(JSON.stringify({ spendingLimits: limits }));
+        } else if (limits) {
+            console.log(`\n💳 Spending Limit: ${limits.amount} USDC per ${limits.period}\n`);
+        } else {
+            console.log("No spending limits configured.");
+        }
     });
 
 program
