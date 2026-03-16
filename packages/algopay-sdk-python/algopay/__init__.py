@@ -8,13 +8,17 @@ Usage:
 
     @app.get("/api/data")
     @paywall(price=0.05, pay_to="YOUR_ALGORAND_ADDRESS")
-    async def my_endpoint(request: Request):
+    async def my_endpoint(request):
         return {"data": "paid content"}
 
 Set ALGOPAY_WALLET_ADDRESS env var to avoid passing pay_to every time.
 """
 
-from .paywall import paywall, PaywallConfig, AlgopayVerificationError
+from .paywall import (
+    paywall as paywall,
+    PaywallConfig as PaywallConfig,
+    AlgopayVerificationError as AlgopayVerificationError,
+)
 
 __all__ = ["paywall", "PaywallConfig", "AlgopayVerificationError"]
 __version__ = "0.1.0"
