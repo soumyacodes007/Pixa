@@ -33,7 +33,6 @@ import functools
 import json
 import os
 import time
-from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Callable, Optional
 
@@ -50,54 +49,61 @@ INDEXER_URLS = {
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-@dataclass
 class PaywallConfig:
-    """Configuration for the @paywall decorator."""
+    """
+    Configuration for the @paywall decorator.
+    All fields are resolved eagerly in __init__ so no attribute is ever None after construction.
+    """
 
     price: float
-    """Price per request in USDC (e.g. 0.05 = $0.05)"""
+    pay_to: str
+    network: str
+    asset: str
+    description: str
+    indexer_url: str
+    indexer_token: str
+    replay_window_sec: int
+    usdc_asset_id: int
 
-    pay_to: Optional[str] = None
-    """Algorand wallet address to receive payments.
-    Defaults to ALGOPAY_WALLET_ADDRESS env var."""
+    def __init__(
+        self,
+        price: float,
+        pay_to: Optional[str] = None,
+        network: str = "algorand-testnet",
+        asset: str = "USDC",
+        description: str = "",
+        indexer_url: Optional[str] = None,
+        indexer_token: str = "",
+        replay_window_sec: int = 300,
+        usdc_asset_id: Optional[int] = None,
+    ) -> None:
+        self.price = price
+        self.network = network
+        self.asset = asset
+        self.description = description
+        self.indexer_token = indexer_token
+        self.replay_window_sec = replay_window_sec
 
-    network: str = "algorand-testnet"
-    """'algorand-testnet' or 'algorand-mainnet'"""
-
-    asset: str = "USDC"
-    """Token to accept: 'USDC' (default) or 'ALGO'"""
-
-    description: str = ""
-    """Human-readable description shown in 402 response."""
-
-    indexer_url: Optional[str] = None
-    """Algorand Indexer base URL (auto-set from network if not provided)."""
-
-    indexer_token: str = ""
-    """Indexer API token (needed for Nodely/paid instances; empty for AlgoNode)."""
-
-    replay_window_sec: int = 300
-    """Time window (seconds) in which a txId can only be used once. Default: 5 min."""
-
-    usdc_asset_id: Optional[int] = None
-    """Override USDC asset ID (useful for custom/fork networks)."""
-
-    def __post_init__(self):
-        if self.pay_to is None:
-            self.pay_to = os.environ.get("ALGOPAY_WALLET_ADDRESS")
-        if not self.pay_to:
+        # Resolve pay_to
+        resolved_pay_to = pay_to or os.environ.get("ALGOPAY_WALLET_ADDRESS")
+        if not resolved_pay_to:
             raise ValueError(
                 "paywall: you must supply pay_to= or set ALGOPAY_WALLET_ADDRESS env var"
             )
-        if self.network not in USDC_ASSET_IDS:
+        self.pay_to = resolved_pay_to
+
+        # Validate network
+        if network not in USDC_ASSET_IDS:
             raise ValueError(
-                f"paywall: unknown network '{self.network}'. "
+                f"paywall: unknown network '{network}'. "
                 f"Use 'algorand-testnet' or 'algorand-mainnet'."
             )
-        if self.indexer_url is None:
-            self.indexer_url = INDEXER_URLS[self.network]
-        if self.usdc_asset_id is None:
-            self.usdc_asset_id = USDC_ASSET_IDS[self.network]
+
+        # Resolve indexer_url
+        self.indexer_url = indexer_url if indexer_url is not None else INDEXER_URLS[network]
+
+        # Resolve usdc_asset_id
+        self.usdc_asset_id = usdc_asset_id if usdc_asset_id is not None else USDC_ASSET_IDS[network]
 
 
 # ─── Custom exception ─────────────────────────────────────────────────────────
@@ -122,7 +128,7 @@ def _is_replay(tx_id: str, window_sec: int) -> bool:
         if used_at is None:
             return False
         if now - used_at > window_sec:
-            del _used_tx_ids[tx_id]
+            _used_tx_ids.pop(tx_id, None)
             return False
         return True
 
@@ -147,6 +153,7 @@ def _verify_payment_sync(
     import urllib.request
     import urllib.error
 
+    assert config.indexer_url is not None, "indexer_url must be set"
     url = f"{config.indexer_url.rstrip('/')}/v2/transactions/{tx_id}"
     req = urllib.request.Request(url)
     if config.indexer_token:
@@ -205,8 +212,9 @@ async def _verify_payment_async(
     falls back to running the sync version in an executor).
     """
     try:
-        import aiohttp  # optional dependency
+        import aiohttp  # type: ignore[import]  # optional dependency
 
+        assert config.indexer_url is not None, "indexer_url must be set"
         url = f"{config.indexer_url.rstrip('/')}/v2/transactions/{tx_id}"
         headers = {}
         if config.indexer_token:
@@ -249,7 +257,7 @@ async def _verify_payment_async(
     except ImportError:
         # aiohttp not available — run sync version in thread pool
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             _verify_payment_sync,
@@ -296,7 +304,7 @@ def _parse_proof(auth_header: str) -> Optional[dict]:
     if not auth_header or not auth_header.startswith("x402 "):
         return None
     try:
-        b64 = auth_header[len("x402 "):].strip()
+        b64 = auth_header.removeprefix("x402 ").strip()
         return json.loads(base64.b64decode(b64).decode("utf-8"))
     except Exception:
         return None
@@ -358,7 +366,6 @@ def paywall(
 
     def decorator(func: Callable) -> Callable:
         import asyncio
-        import inspect
 
         is_async = asyncio.iscoroutinefunction(func)
 
@@ -386,6 +393,7 @@ def paywall(
                 if _is_replay(tx_id, config.replay_window_sec):
                     return _fastapi_402_replay()
 
+                assert config.pay_to is not None  # guaranteed by PaywallConfig.__post_init__
                 valid, reason = await _verify_payment_async(
                     tx_id, config.pay_to, config.price, config
                 )
@@ -406,7 +414,7 @@ def paywall(
 
                 return await func(*args, **kwargs)
 
-            return async_wrapper
+            return async_wrapper  # type: ignore[return-value]
 
         else:
             # ── Flask / sync path ─────────────────────────────────────────
@@ -429,6 +437,7 @@ def paywall(
                 if _is_replay(tx_id, config.replay_window_sec):
                     return _flask_402_replay()
 
+                assert config.pay_to is not None  # guaranteed by PaywallConfig.__post_init__
                 valid, reason = _verify_payment_sync(
                     tx_id, config.pay_to, config.price, config
                 )
@@ -438,7 +447,7 @@ def paywall(
                 _mark_used(tx_id)
                 return func(*args, **kwargs)
 
-            return sync_wrapper
+            return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
@@ -446,21 +455,18 @@ def paywall(
 # ─── FastAPI helpers ──────────────────────────────────────────────────────────
 
 def _extract_request_fastapi(kwargs: dict) -> Any:
-    """Find a FastAPI Request object in kwargs."""
-    try:
-        from starlette.requests import Request
-        for v in kwargs.values():
-            if isinstance(v, Request):
-                return v
-        # Also try positional-style injection name
-        return kwargs.get("request")
-    except ImportError:
-        return kwargs.get("request")
+    """Find a FastAPI Request object in kwargs (duck-typed to avoid starlette import requirement)."""
+    # Check for a starlette/FastAPI Request-like object by duck typing
+    # (has .headers dict-like and .state attribute)
+    for v in kwargs.values():
+        if hasattr(v, "headers") and hasattr(v, "state") and hasattr(v, "method"):
+            return v
+    return kwargs.get("request")
 
 
 def _fastapi_402(config: PaywallConfig):
     try:
-        from starlette.responses import JSONResponse
+        from starlette.responses import JSONResponse  # type: ignore[import]
         body = _build_402_body(config)
         return JSONResponse(
             content=body,
@@ -473,7 +479,7 @@ def _fastapi_402(config: PaywallConfig):
 
 def _fastapi_400(msg: str):
     try:
-        from starlette.responses import JSONResponse
+        from starlette.responses import JSONResponse  # type: ignore[import]
         return JSONResponse(content={"error": msg}, status_code=400)
     except ImportError:
         raise AlgopayVerificationError(msg)
@@ -481,7 +487,7 @@ def _fastapi_400(msg: str):
 
 def _fastapi_402_replay():
     try:
-        from starlette.responses import JSONResponse
+        from starlette.responses import JSONResponse  # type: ignore[import]
         return JSONResponse(
             content={
                 "error": "Payment Replay Detected",
@@ -495,7 +501,7 @@ def _fastapi_402_replay():
 
 def _fastapi_402_failed(reason: str):
     try:
-        from starlette.responses import JSONResponse
+        from starlette.responses import JSONResponse  # type: ignore[import]
         return JSONResponse(
             content={"error": "Payment Verification Failed", "reason": reason},
             status_code=402,
@@ -508,7 +514,7 @@ def _fastapi_402_failed(reason: str):
 
 def _extract_request_flask() -> Any:
     try:
-        from flask import request
+        from flask import request  # type: ignore[import]
         return request
     except ImportError:
         return None
@@ -516,7 +522,7 @@ def _extract_request_flask() -> Any:
 
 def _flask_402(config: PaywallConfig):
     try:
-        from flask import jsonify, make_response
+        from flask import jsonify, make_response  # type: ignore[import]
         body = _build_402_body(config)
         resp = make_response(jsonify(body), 402)
         resp.headers["X-Payment"] = _build_x_payment_header(config)
@@ -527,7 +533,7 @@ def _flask_402(config: PaywallConfig):
 
 def _flask_400(msg: str):
     try:
-        from flask import jsonify, make_response
+        from flask import jsonify, make_response  # type: ignore[import]
         return make_response(jsonify({"error": msg}), 400)
     except ImportError:
         raise AlgopayVerificationError(msg)
@@ -535,7 +541,7 @@ def _flask_400(msg: str):
 
 def _flask_402_replay():
     try:
-        from flask import jsonify, make_response
+        from flask import jsonify, make_response  # type: ignore[import]
         return make_response(jsonify({
             "error": "Payment Replay Detected",
             "message": "This transaction has already been used. Submit a new payment.",
@@ -546,7 +552,7 @@ def _flask_402_replay():
 
 def _flask_402_failed(reason: str):
     try:
-        from flask import jsonify, make_response
+        from flask import jsonify, make_response  # type: ignore[import]
         return make_response(jsonify({
             "error": "Payment Verification Failed",
             "reason": reason,
