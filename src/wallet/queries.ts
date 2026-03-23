@@ -224,7 +224,7 @@ export async function getHistory(
 /**
  * Get suggested transaction parameters (Req 27)
  */
-export async function getSuggestedParams(network: "testnet" | "mainnet") {
+export async function getSuggestedParams(network: "testnet" | "mainnet"): Promise<any> {
     const algod = createAlgodClient(network);
     return await algod.getTransactionParams().do();
 }
@@ -238,5 +238,5 @@ export async function waitForConfirmation(
     maxWaitRounds = 10
 ): Promise<Record<string, unknown>> {
     const algod = createAlgodClient(network);
-    return await algosdk.waitForConfirmation(algod, txId, maxWaitRounds);
+    return await algosdk.waitForConfirmation(algod, txId, maxWaitRounds) as any;
 }

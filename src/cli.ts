@@ -6,11 +6,13 @@ import * as authClient from "./auth/client.js";
 import * as wallet from "./wallet/queries.js";
 import { sendPayment } from "./wallet/send.js";
 import * as vestige from "./wallet/vestige.js";
-import { searchBazaar } from "./x402/bazaar.js";
+import { searchBazaar, registerWithBazaar } from "./x402/bazaar.js";
 import { payAndFetch } from "./x402/pay.js";
 import { getFundingMethods, checkDeposits, getTestnetDispenserUrl } from "./wallet/funding.js";
 import { smartResolve, isNfdName, resolveAddressToNfd } from "./wallet/nfd.js";
 import { getTransactionHistory, getAssetHoldings, getNetworkStatus } from "./wallet/advanced.js";
+import { executeBatch, generateBatchTemplate } from "./batch/batch.js";
+import { addWebhook, listWebhooks, removeWebhook } from "./webhooks/webhooks.js";
 
 const program = new Command();
 
@@ -183,50 +185,6 @@ program
             console.log(JSON.stringify({ address }));
         } else {
             console.log(address);
-        }
-    });
-
-program
-    .command("history")
-    .description("View transaction history")
-    .option("--limit <n>", "Number of transactions", "10")
-    .option("--type <type>", "Filter by type (send|receive|trade)")
-    .action(async (cmdOpts: { limit: string; type?: string }) => {
-        const address = authClient.getWalletAddress();
-        if (!address) {
-            console.error("Not authenticated. Run: algopay auth login <email>");
-            process.exit(1);
-        }
-        const opts = program.opts();
-        const network = opts.resolvedNetwork ?? "testnet";
-        try {
-            const txns = await wallet.getHistory(address, network, {
-                limit: parseInt(cmdOpts.limit, 10),
-                type: cmdOpts.type as any,
-            });
-            if (opts.json) {
-                console.log(JSON.stringify(txns));
-            } else {
-                console.log(`\n📜 Transaction History (${network})\n`);
-                if (txns.length === 0) {
-                    console.log("   No transactions found.\n");
-                } else {
-                    for (const tx of txns) {
-                        const date = new Date(tx.roundTime * 1000).toISOString();
-                        const arrow = tx.type === "send" ? "⬆" : "⬇";
-                        const amt = tx.assetId
-                            ? `${tx.amount} (ASA ${tx.assetId})`
-                            : `${(tx.amount / 1_000_000).toFixed(6)} ALGO`;
-                        console.log(`   ${arrow} ${tx.type.toUpperCase()} ${amt}`);
-                        console.log(`     ${tx.type === "send" ? "To" : "From"}: ${tx.receiver || tx.sender}`);
-                        console.log(`     Round: ${tx.confirmedRound} | Fee: ${tx.fee} | ${date}`);
-                        console.log(`     TX: ${tx.id}\n`);
-                    }
-                }
-            }
-        } catch (err: any) {
-            console.error(`Error: ${err.message}`);
-            process.exit(1);
         }
     });
 
@@ -454,6 +412,68 @@ bazaar
     });
 
 x402
+    .command("bazaar register <serviceUrl>")
+    .description("Register your x402 API endpoint with GoPlausible Bazaar")
+    .requiredOption("--name <name>", "Service name shown in Bazaar")
+    .requiredOption("--price <usdc>", "Price per request in USDC (e.g. 0.05)")
+    .option("--description <desc>", "Short description of your API", "")
+    .option("--category <cat>", "Category (api|data|ai|analytics)", "api")
+    .option("--tags <tags>", "Comma-separated tags", "x402,algorand")
+    .action(async (serviceUrl: string, cmdOpts: {
+        name: string; price: string; description: string;
+        category: string; tags: string;
+    }) => {
+        const address = authClient.getWalletAddress();
+        if (!address) {
+            console.error("Not authenticated. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+        const opts = program.opts();
+        const network = opts.resolvedNetwork ?? "testnet";
+        const priceUsdc = parseFloat(cmdOpts.price);
+        if (isNaN(priceUsdc) || priceUsdc <= 0) {
+            console.error("Invalid price. Must be a positive number.");
+            process.exit(1);
+        }
+
+        console.log(`\n📋 Registering with GoPlausible Bazaar...`);
+        console.log(`   Service: ${cmdOpts.name}`);
+        console.log(`   URL:     ${serviceUrl}`);
+        console.log(`   Price:   $${priceUsdc} USDC / request`);
+        console.log(`   Pay-to:  ${address.slice(0, 16)}...\n`);
+
+        try {
+            const result = await registerWithBazaar({
+                name:         cmdOpts.name,
+                description:  cmdOpts.description || `x402-enabled API: ${cmdOpts.name}`,
+                serviceUrl,
+                priceUsdc,
+                payToAddress: address,
+                network:      network === "mainnet" ? "algorand-mainnet" : "algorand-testnet",
+                category:     cmdOpts.category,
+                tags:         cmdOpts.tags.split(",").map((t: string) => t.trim()),
+            });
+
+            if (opts.json) {
+                console.log(JSON.stringify(result));
+            } else if (result.success) {
+                console.log(`✅ Registered on Bazaar!`);
+                if (result.id) console.log(`   ID:  ${result.id}`);
+                if (result.url) console.log(`   URL: ${result.url}`);
+                console.log();
+            } else {
+                console.error(`❌ ${result.message}`);
+                console.log(`\n   To get a Bazaar API key: https://goplausible.xyz`);
+                console.log(`   Then add  BAZAAR_API_KEY=<key>  to your .env file\n`);
+                process.exit(1);
+            }
+        } catch (err: any) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+        }
+    });
+
+x402
     .command("pay <url>")
     .description("Pay for an x402 service (auto-handles 402 challenge)")
     .option("--max-price <usdc>", "Max USDC willing to pay", "1.0")
@@ -495,6 +515,7 @@ x402
                     console.log(`--- Response ---`);
                     console.log(result.responseBody.slice(0, 1000));
                     console.log(`--- End Response ---\n`);
+
                 }
             }
         } catch (err: any) {
@@ -775,47 +796,183 @@ program
         }
     });
 
-// --- Batch commands ---
-program
-    .command("batch <file>")
-    .description("Execute batch transactions from JSON file")
-    .action(async () => {
-        console.log("TODO: Parse batch file → atomic groups → execute");
-    });
-
-// --- Webhook commands ---
-const webhook = program
-    .command("webhook")
-    .description("Webhook management");
-
-webhook
-    .command("add <url>")
-    .description("Register a webhook")
-    .option("--events <events>", "Filter by events (comma-separated)")
-    .action(async () => {
-        console.log("TODO: Register webhook");
-    });
-
-webhook
-    .command("list")
-    .description("List registered webhooks")
-    .action(async () => {
-        console.log("TODO: List webhooks");
-    });
-
-webhook
-    .command("remove <id>")
-    .description("Remove a webhook")
-    .action(async () => {
-        console.log("TODO: Remove webhook");
-    });
-
 // --- Dashboard ---
 program
     .command("show")
     .description("Open the web dashboard")
     .action(async () => {
-        console.log("TODO: Open dashboard URL in browser");
+        const address = authClient.getWalletAddress();
+        if (!address) {
+            console.error("Not authenticated. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+
+        const dashboardUrl = process.env.ALGOPAY_DASHBOARD_URL || "http://localhost:5173";
+        
+        console.log(`\n📊 Opening Algopay Dashboard...`);
+        console.log(`   URL: ${dashboardUrl}`);
+        console.log(`   Wallet: ${address.slice(0, 8)}...${address.slice(-8)}\n`);
+        
+        // Try to open in browser
+        try {
+            const { default: open } = await import("open");
+            await open(dashboardUrl);
+            console.log("✅ Dashboard opened in your default browser\n");
+        } catch (error) {
+            console.log("⚠️  Could not auto-open browser. Please visit the URL above manually.\n");
+        }
+    });
+
+// --- Batch commands ---
+const batch = program.command("batch").description("Batch transaction commands");
+
+batch
+    .command("execute <file>")
+    .description("Execute batch transactions from JSON file")
+    .option("--dry-run", "Simulate without broadcasting")
+    .action(async (file: string, cmdOpts: { dryRun?: boolean }) => {
+        const address = authClient.getWalletAddress();
+        if (!address) {
+            console.error("Not authenticated. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+
+        const sessionToken = authClient.getSessionToken();
+        if (!sessionToken) {
+            console.error("No session token. Run: algopay auth login <email>");
+            process.exit(1);
+        }
+
+        const opts = program.opts();
+        const network = opts.resolvedNetwork ?? "testnet";
+
+        console.log(`\n🔄 Executing batch transactions...`);
+        console.log(`   File: ${file}`);
+        console.log(`   Network: ${network}`);
+        console.log(`   Dry run: ${cmdOpts.dryRun ? "Yes" : "No"}\n`);
+
+        try {
+            const result = await executeBatch(file, address, sessionToken, {
+                network,
+                dryRun: cmdOpts.dryRun,
+            });
+
+            if (opts.json) {
+                console.log(JSON.stringify(result, null, 2));
+                return;
+            }
+
+            if (result.success) {
+                console.log(`✅ Batch completed successfully!`);
+                console.log(`   Total: ${result.totalTransactions}`);
+                console.log(`   Successful: ${result.successfulTransactions}`);
+                console.log(`   Failed: ${result.failedTransactions}\n`);
+            } else {
+                console.error(`❌ Batch failed: ${result.error}`);
+                console.log(`   Successful: ${result.successfulTransactions}`);
+                console.log(`   Failed: ${result.failedTransactions}\n`);
+            }
+
+            // Show individual results
+            for (const r of result.results) {
+                const status = r.success ? "✅" : "❌";
+                console.log(`   ${status} Transaction ${r.index}: ${r.transaction.type}`);
+                if (r.success && r.txId) {
+                    console.log(`      TX: ${r.txId}`);
+                } else if (r.error) {
+                    console.log(`      Error: ${r.error}`);
+                }
+            }
+        } catch (error: any) {
+            console.error(`❌ Batch execution failed: ${error.message}`);
+            process.exit(1);
+        }
+    });
+
+batch
+    .command("template")
+    .description("Generate a batch transaction template file")
+    .action(() => {
+        const template = generateBatchTemplate();
+        console.log(JSON.stringify(template, null, 2));
+    });
+
+// --- Webhook commands ---
+const webhook = program.command("webhook").description("Webhook notification commands");
+
+webhook
+    .command("add <url>")
+    .description("Add a webhook for transaction notifications")
+    .option("--events <events>", "Comma-separated list of events", "transaction.sent,transaction.received")
+    .option("--secret <secret>", "Secret for webhook signature verification")
+    .action((url: string, cmdOpts: { events: string; secret?: string }) => {
+        const events = cmdOpts.events.split(",").map(e => e.trim()) as any[];
+        
+        try {
+            const webhook = addWebhook(url, events, cmdOpts.secret);
+            const opts = program.opts();
+            
+            if (opts.json) {
+                console.log(JSON.stringify(webhook, null, 2));
+                return;
+            }
+
+            console.log(`\n✅ Webhook added successfully!`);
+            console.log(`   ID: ${webhook.id}`);
+            console.log(`   URL: ${webhook.url}`);
+            console.log(`   Events: ${webhook.events.join(", ")}`);
+            console.log(`   Secret: ${webhook.secret ? "Set" : "None"}\n`);
+        } catch (error: any) {
+            console.error(`❌ Failed to add webhook: ${error.message}`);
+            process.exit(1);
+        }
+    });
+
+webhook
+    .command("list")
+    .description("List all configured webhooks")
+    .action(() => {
+        const webhooks = listWebhooks();
+        const opts = program.opts();
+
+        if (opts.json) {
+            console.log(JSON.stringify(webhooks, null, 2));
+            return;
+        }
+
+        if (webhooks.length === 0) {
+            console.log("\n📭 No webhooks configured\n");
+            return;
+        }
+
+        console.log(`\n🔗 Configured Webhooks (${webhooks.length})\n`);
+        
+        for (const w of webhooks) {
+            const status = w.active ? "🟢 Active" : "🔴 Inactive";
+            const lastTriggered = w.lastTriggered 
+                ? new Date(w.lastTriggered).toISOString()
+                : "Never";
+            
+            console.log(`   ${status} ${w.id}`);
+            console.log(`      URL: ${w.url}`);
+            console.log(`      Events: ${w.events.join(", ")}`);
+            console.log(`      Last triggered: ${lastTriggered}`);
+            console.log(`      Failures: ${w.failureCount}\n`);
+        }
+    });
+
+webhook
+    .command("remove <id>")
+    .description("Remove a webhook by ID")
+    .action((id: string) => {
+        const removed = removeWebhook(id);
+        
+        if (removed) {
+            console.log(`✅ Webhook ${id} removed successfully`);
+        } else {
+            console.error(`❌ Webhook ${id} not found`);
+            process.exit(1);
+        }
     });
 
 // --- Parse and run ---

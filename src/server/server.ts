@@ -11,6 +11,15 @@
 import express from "express";
 import { randomInt, randomUUID } from "crypto";
 import jwt from "jsonwebtoken";
+import { WebSocketServer } from "ws";
+import http from "http";
+import * as wallet from "../wallet/queries.js";
+import { IntermezzoClient } from "../wallet/intermezzo.js";
+
+// Singleton Intermezzo client — uses INTERMEZZO_URL + INTERMEZZO_TOKEN env vars.
+// Falls back to mock mode (valid algosdk addresses) when env vars are not set.
+const intermezzo = new IntermezzoClient();
+
 
 // --- Types ---
 
@@ -24,6 +33,13 @@ interface OtpRecord {
 interface RateLimitRecord {
     count: number;
     resetAt: number;
+}
+
+interface AuthenticatedRequest extends express.Request {
+    user?: {
+        email: string;
+        walletAddress: string;
+    };
 }
 
 // --- Config ---
@@ -157,6 +173,20 @@ async function sendOtpEmail(email: string, otp: string): Promise<void> {
 
 export function createAuthServer(storeOverride?: KVStore) {
     const app = express();
+    
+    // CORS middleware for dashboard
+    app.use((req, res, next) => {
+        res.header('Access-Control-Allow-Origin', '*');
+        res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+        
+        if (req.method === 'OPTIONS') {
+            res.sendStatus(200);
+        } else {
+            next();
+        }
+    });
+    
     app.use(express.json());
 
     // Store will be initialized async, use memory as default
@@ -324,9 +354,21 @@ export function createAuthServer(storeOverride?: KVStore) {
         // OTP matches — success!
         await store.del(`otp:${flowId}`);
 
-        // In production: create Intermezzo session and get wallet address
-        // For dev: generate mock wallet address
-        const walletAddress = generateWalletAddress();
+        // In production: call Intermezzo to create a custodial Algorand wallet.
+        // Private key is stored in HashiCorp Vault — NEVER exported.
+        // In dev (no INTERMEZZO_URL set): returns a valid algosdk address via mock mode.
+        let walletAddress: string;
+        try {
+            const accountResult = await intermezzo.createAccount(flowId);
+            walletAddress = accountResult.address;
+        } catch (intermezzoErr: any) {
+            res.status(503).json({
+                error: "WALLET_CREATION_FAILED",
+                message: `Could not create wallet: ${intermezzoErr.message}. Ensure Intermezzo is running or INTERMEZZO_URL is not set (dev mode).`,
+            });
+            return;
+        }
+
 
         // Generate JWT session token (Req 21.7: 30-day validity)
         const sessionToken = jwt.sign(
@@ -433,6 +475,150 @@ export function createAuthServer(storeOverride?: KVStore) {
         });
     });
 
+    /**
+     * GET /metrics
+     * Prometheus metrics endpoint (Req 45)
+     */
+    app.get("/metrics", (_req, res) => {
+        // Basic metrics in Prometheus format
+        const metrics = [
+            '# HELP algopay_requests_total Total number of requests',
+            '# TYPE algopay_requests_total counter',
+            'algopay_requests_total 0',
+            '',
+            '# HELP algopay_auth_sessions_active Active authentication sessions',
+            '# TYPE algopay_auth_sessions_active gauge',
+            'algopay_auth_sessions_active 0',
+            '',
+            '# HELP algopay_storage_type Storage backend type',
+            '# TYPE algopay_storage_type gauge',
+            `algopay_storage_type{type="${store.type}"} 1`,
+            '',
+            '# HELP algopay_uptime_seconds Server uptime in seconds',
+            '# TYPE algopay_uptime_seconds counter',
+            `algopay_uptime_seconds ${Math.floor(process.uptime())}`,
+        ].join('\n');
+
+        res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+        res.send(metrics);
+    });
+
+    // --- Auth middleware for protected routes ---
+    const requireAuth = (req: AuthenticatedRequest, res: express.Response, next: express.NextFunction) => {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+        if (!token) {
+            return res.status(401).json({
+                error: "NO_TOKEN",
+                message: "Authorization header required.",
+            });
+        }
+
+        if (invalidatedTokens.has(token)) {
+            return res.status(401).json({
+                error: "TOKEN_INVALIDATED",
+                message: "Session has been logged out.",
+            });
+        }
+
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET) as {
+                email: string;
+                walletAddress: string;
+            };
+
+            req.user = {
+                email: decoded.email,
+                walletAddress: decoded.walletAddress,
+            };
+
+            next();
+        } catch {
+            return res.status(401).json({
+                error: "INVALID_TOKEN",
+                message: "Session token is invalid or expired.",
+            });
+        }
+    };
+
+    // --- Wallet API endpoints for dashboard ---
+
+    /**
+     * GET /api/wallet/status
+     * Returns wallet status information
+     */
+    app.get("/api/wallet/status", requireAuth, async (req: AuthenticatedRequest, res) => {
+        try {
+            const network = (req.query.network as string) || "testnet";
+            const status = await wallet.getStatus(req.user!.walletAddress, network as "testnet" | "mainnet");
+            res.json(status);
+        } catch (error: any) {
+            res.status(500).json({
+                error: "WALLET_ERROR",
+                message: error.message,
+            });
+        }
+    });
+
+    /**
+     * GET /api/wallet/balance
+     * Returns wallet balance information
+     */
+    app.get("/api/wallet/balance", requireAuth, async (req: AuthenticatedRequest, res) => {
+        try {
+            const network = (req.query.network as string) || "testnet";
+            const balance = await wallet.getBalance(req.user!.walletAddress, network as "testnet" | "mainnet");
+            res.json(balance);
+        } catch (error: any) {
+            res.status(500).json({
+                error: "WALLET_ERROR",
+                message: error.message,
+            });
+        }
+    });
+
+    /**
+     * GET /api/wallet/history
+     * Returns transaction history
+     */
+    app.get("/api/wallet/history", requireAuth, async (req: AuthenticatedRequest, res) => {
+        try {
+            const network = (req.query.network as string) || "testnet";
+            const limit = parseInt(req.query.limit as string) || 10;
+            const history = await wallet.getHistory(req.user!.walletAddress, network as "testnet" | "mainnet", { limit });
+            res.json(history);
+        } catch (error: any) {
+            res.status(500).json({
+                error: "WALLET_ERROR",
+                message: error.message,
+            });
+        }
+    });
+
+    /**
+     * GET /api/config/limits
+     * Returns spending limits (mock for now)
+     */
+    app.get("/api/config/limits", requireAuth, async (req: AuthenticatedRequest, res) => {
+        // Mock spending limits - in production this would come from user config
+        const limits = [
+            {
+                amount: 100,
+                period: "daily",
+                asset: "USDC",
+                used: 25.50,
+            },
+            {
+                amount: 500,
+                period: "weekly",
+                asset: "USDC",
+                used: 125.75,
+            }
+        ];
+        res.json(limits);
+    });
+
     return app;
 }
 
@@ -446,12 +632,72 @@ if (
         process.argv[1].endsWith("server.js"))
 ) {
     const app = createAuthServer();
-    app.listen(PORT, () => {
+    
+    // Create HTTP server for WebSocket support
+    const server = http.createServer(app);
+    
+    // WebSocket server for live updates
+    const wss = new WebSocketServer({ 
+        server,
+        path: '/ws'
+    });
+
+    // Store connected clients
+    const clients = new Set<any>();
+
+    wss.on('connection', (ws, req) => {
+        console.log('WebSocket client connected');
+        clients.add(ws);
+
+        ws.on('close', () => {
+            console.log('WebSocket client disconnected');
+            clients.delete(ws);
+        });
+
+        ws.on('error', (error) => {
+            console.error('WebSocket error:', error);
+            clients.delete(ws);
+        });
+
+        // Send initial connection confirmation
+        ws.send(JSON.stringify({
+            type: 'connected',
+            timestamp: new Date().toISOString()
+        }));
+    });
+
+    // Broadcast function for live updates
+    const broadcast = (data: any) => {
+        const message = JSON.stringify(data);
+        clients.forEach(client => {
+            if (client.readyState === 1) { // WebSocket.OPEN
+                client.send(message);
+            }
+        });
+    };
+
+    // Example: broadcast balance updates (would be triggered by actual events)
+    setInterval(() => {
+        if (clients.size > 0) {
+            broadcast({
+                type: 'heartbeat',
+                timestamp: new Date().toISOString(),
+                clients: clients.size
+            });
+        }
+    }, 30000); // Every 30 seconds
+
+    server.listen(PORT, () => {
         console.log(`🔐 Algopay Auth Server running on http://localhost:${PORT}`);
-        console.log(`   POST /auth/login    — send OTP`);
-        console.log(`   POST /auth/verify   — verify OTP`);
-        console.log(`   POST /auth/logout   — end session`);
-        console.log(`   GET  /auth/session  — check session`);
-        console.log(`   GET  /health        — health check`);
+        console.log(`   POST /auth/login         — send OTP`);
+        console.log(`   POST /auth/verify        — verify OTP`);
+        console.log(`   POST /auth/logout        — end session`);
+        console.log(`   GET  /auth/session       — check session`);
+        console.log(`   GET  /api/wallet/status  — wallet status`);
+        console.log(`   GET  /api/wallet/balance — wallet balance`);
+        console.log(`   GET  /api/wallet/history — transaction history`);
+        console.log(`   GET  /api/config/limits  — spending limits`);
+        console.log(`   GET  /health             — health check`);
+        console.log(`   WS   /ws                 — WebSocket for live updates`);
     });
 }

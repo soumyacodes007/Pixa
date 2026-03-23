@@ -1,12 +1,14 @@
 /**
  * Intermezzo Client — Wrapper for Algorand Foundation's custodial signing API
  * Req 17: All signing must go through Intermezzo
+ * Req 30: Circuit breaker for health monitoring
  *
  * In production, Intermezzo runs on HashiCorp Vault and exposes REST endpoints.
  * In dev mode, we use a mock that simulates the signing flow.
  */
 
 import algosdk from "algosdk";
+import { logger } from "../utils/production.js";
 
 // --- Types ---
 
@@ -20,12 +22,72 @@ export interface SignResult {
     txIds: string[];
 }
 
+// --- Circuit Breaker ---
+
+class CircuitBreaker {
+    private failures = 0;
+    private lastFailureTime = 0;
+    private state: 'CLOSED' | 'OPEN' | 'HALF_OPEN' = 'CLOSED';
+    
+    constructor(
+        private failureThreshold = 5,
+        private recoveryTimeMs = 60000 // 1 minute
+    ) {}
+
+    async execute<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.state === 'OPEN') {
+            if (Date.now() - this.lastFailureTime > this.recoveryTimeMs) {
+                this.state = 'HALF_OPEN';
+                logger.info('Circuit breaker transitioning to HALF_OPEN');
+            } else {
+                throw new Error('Circuit breaker is OPEN - Intermezzo unavailable');
+            }
+        }
+
+        try {
+            const result = await fn();
+            this.onSuccess();
+            return result;
+        } catch (error) {
+            this.onFailure();
+            throw error;
+        }
+    }
+
+    private onSuccess() {
+        this.failures = 0;
+        if (this.state === 'HALF_OPEN') {
+            this.state = 'CLOSED';
+            logger.info('Circuit breaker reset to CLOSED');
+        }
+    }
+
+    private onFailure() {
+        this.failures++;
+        this.lastFailureTime = Date.now();
+        
+        if (this.failures >= this.failureThreshold) {
+            this.state = 'OPEN';
+            logger.error(`Circuit breaker opened after ${this.failures} failures`);
+        }
+    }
+
+    getState() {
+        return {
+            state: this.state,
+            failures: this.failures,
+            lastFailureTime: this.lastFailureTime,
+        };
+    }
+}
+
 // --- Client ---
 
 export class IntermezzoClient {
     private url: string;
     private token: string;
     private mockMode: boolean;
+    private circuitBreaker: CircuitBreaker;
 
     constructor(config?: IntermezzoConfig) {
         this.url =
@@ -33,11 +95,10 @@ export class IntermezzoClient {
         this.token =
             config?.token ?? process.env.INTERMEZZO_TOKEN ?? "";
         this.mockMode = !config?.url && !process.env.INTERMEZZO_URL;
+        this.circuitBreaker = new CircuitBreaker();
 
         if (this.mockMode) {
-            console.log(
-                "[Intermezzo] Running in MOCK mode — no real signing"
-            );
+            logger.info("Intermezzo running in MOCK mode — no real signing");
         }
     }
 
@@ -47,14 +108,21 @@ export class IntermezzoClient {
     async healthCheck(): Promise<boolean> {
         if (this.mockMode) return true;
 
-        try {
-            const res = await fetch(`${this.url}/v1/health`, {
-                headers: { Authorization: `Bearer ${this.token}` },
+        return this.circuitBreaker.execute(async () => {
+            const response = await fetch(`${this.url}/v1/health`, {
+                method: "GET",
+                headers: {
+                    "Authorization": `Bearer ${this.token}`,
+                },
+                signal: AbortSignal.timeout(5000), // 5 second timeout
             });
-            return res.ok;
-        } catch {
-            return false;
-        }
+
+            if (!response.ok) {
+                throw new Error(`Intermezzo health check failed: ${response.status}`);
+            }
+
+            return true;
+        });
     }
 
     /**

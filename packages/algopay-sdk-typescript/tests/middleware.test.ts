@@ -40,7 +40,7 @@ interface MockResponse {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const TEST_PAY_TO = "TESTINGGYWBBFR6MT3EZLLVYLZZOKWXKDPBEIJEBMRCJJCN2O3VQ";
+const TEST_PAY_TO = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ";
 const TEST_TX_ID  = "TESTTXIDABCDEF1234567890ABCDEF1234567890ABCDEF12345";
 
 function makeProofHeader(txId: string = TEST_TX_ID): string {
@@ -177,7 +177,7 @@ describe("paymentMiddleware — with payment", () => {
             }) as any);
 
         const mw  = paymentMiddleware(TEST_PAY_TO, { "GET /api/data": "$1.00" });
-        const req = makeReq({ auth: makeProofHeader() });
+        const req = makeReq({ auth: makeProofHeader("TX_INSUFFICIENT_FUNDS_123") });
         const res = makeRes();
         const next = vi.fn();
 
@@ -200,7 +200,7 @@ describe("paymentMiddleware — with payment", () => {
             }) as any);
 
         const mw  = paymentMiddleware(TEST_PAY_TO, { "GET /api/data": "$0.05" });
-        const req = makeReq({ auth: makeProofHeader() });
+        const req = makeReq({ auth: makeProofHeader("TX_WRONG_RECIPIENT_123") });
         const res = makeRes();
         const next = vi.fn();
 
