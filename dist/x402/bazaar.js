@@ -128,8 +128,8 @@ export async function searchBazaar(query, options = {}) {
             return result;
         }
         const raw = (await res.json());
-        // Normalize the response — GoPlausible API shape may vary
-        const resources = (raw.resources ?? raw.data ?? raw.results ?? []).map((r) => ({
+        // Normalize the response — GoPlausible API shape may vary (v1 vs v2)
+        const resources = (raw.items ?? raw.resources ?? raw.data ?? raw.results ?? []).map((r) => ({
             id: r.id ?? r.resource_id ?? "",
             name: r.name ?? r.title ?? "Unknown Service",
             description: r.description ?? "",
@@ -143,7 +143,7 @@ export async function searchBazaar(query, options = {}) {
         }));
         const result = {
             resources,
-            total: raw.total ?? resources.length,
+            total: raw.pagination?.total ?? raw.total ?? resources.length,
             query,
             cachedAt: Date.now(),
         };

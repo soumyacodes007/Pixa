@@ -220,8 +220,8 @@ export async function searchBazaar(
 
     const raw = (await res.json()) as any;
 
-    // Normalize the response — GoPlausible API shape may vary
-    const resources: BazaarResource[] = (raw.resources ?? raw.data ?? raw.results ?? []).map(
+    // Normalize the response — GoPlausible API shape may vary (v1 vs v2)
+    const resources: BazaarResource[] = (raw.items ?? raw.resources ?? raw.data ?? raw.results ?? []).map(
       (r: any) => ({
         id: r.id ?? r.resource_id ?? "",
         name: r.name ?? r.title ?? "Unknown Service",
@@ -238,7 +238,7 @@ export async function searchBazaar(
 
     const result: BazaarSearchResult = {
       resources,
-      total: raw.total ?? resources.length,
+      total: raw.pagination?.total ?? raw.total ?? resources.length,
       query,
       cachedAt: Date.now(),
     };
