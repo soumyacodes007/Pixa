@@ -1,3 +1,5 @@
+![PIXA](assets/image.png)
+
 # PIXA - Algorand Wallet for AI Agents
 
 > Give AI agents the power to transact autonomously on Algorand using x402 micropayments
