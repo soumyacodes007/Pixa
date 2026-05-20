@@ -17,7 +17,7 @@ But they cannot pay — until now.
 
 Pixa is a full-featured MCP wallet that gives AI agents the ability to autonomously discover, authorize, and settle micropayments on Algorand using the x402 protocol. No API keys. No pre-configured billing. No human in the loop unless you want one.
 
-** [Latest Release](https://github.com/soumyacodes007/Pixa/releases/latest)**
+
 
 ---
 
