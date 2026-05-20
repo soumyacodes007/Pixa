@@ -5,9 +5,11 @@
 ![Algorand](https://img.shields.io/badge/Algorand-Mainnet-blue?style=flat-square)
 ![MCP](https://img.shields.io/badge/MCP-Native-black?style=flat-square)
 ![x402](https://img.shields.io/badge/x402-Supported-green?style=flat-square)
-![demo](https://youtu.be/VGMRlsP6Tj0?si=tbwh-klI1O8NHYEh)
+![TypeScript](https://img.shields.io/badge/TypeScript-94%25-blue?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-gray?style=flat-square)
 ![Network](https://img.shields.io/badge/Network-Mainnet-brightgreen?style=flat-square)
+
+
 
 ---
 
@@ -17,7 +19,7 @@ But they cannot pay — until now.
 
 Pixa is a full-featured MCP wallet that gives AI agents the ability to autonomously discover, authorize, and settle micropayments on Algorand using the x402 protocol. No API keys. No pre-configured billing. No human in the loop unless you want one.
 
-
+demo : https://youtu.be/VGMRlsP6Tj0?si=tbwh-klI1O8NHYEh
 
 ---
 
