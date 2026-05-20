@@ -1,78 +1,158 @@
-![PIXA](assets/image.png)
+# Pixa Wallet
 
-# PIXA - Algorand Wallet for AI Agents
+> The first agentic payment wallet built for Algorand — plug into Claude or any agent framework in under 60 seconds.
 
-> Give AI agents the power to transact autonomously on Algorand using x402 micropayments
+![Algorand](https://img.shields.io/badge/Algorand-Mainnet-blue?style=flat-square)
+![MCP](https://img.shields.io/badge/MCP-Native-black?style=flat-square)
+![x402](https://img.shields.io/badge/x402-Supported-green?style=flat-square)
+![TypeScript](https://img.shields.io/badge/TypeScript-94%25-blue?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-gray?style=flat-square)
+![Network](https://img.shields.io/badge/Network-Mainnet-brightgreen?style=flat-square)
 
-## 🎯 The Problem
+---
 
-AI agents are becoming increasingly autonomous, but they lack a fundamental capability: **the ability to pay for resources independently**. Current solutions require:
+AI agents can reason. They can plan. They can execute.
 
-- Manual API key management
-- Pre-configured billing accounts
-- Human intervention for every new service
-- Complex subscription models that don't fit agent workflows
+But they cannot pay — until now.
 
-This creates a bottleneck where agents can reason, plan, and execute tasks, but cannot complete transactions without human setup. They're intelligent but financially dependent.
+Pixa is a full-featured MCP wallet that gives AI agents the ability to autonomously discover, authorize, and settle micropayments on Algorand using the x402 protocol. No API keys. No pre-configured billing. No human in the loop unless you want one.
 
-## 💡 The Solution
+** [Latest Release](https://github.com/soumyacodes007/Pixa/releases/latest)**
 
-**PIXA** is a full-featured Algorand wallet designed specifically for AI agents, enabling autonomous payments through the x402 protocol. It allows agents to:
+---
 
-- ✅ Discover and pay for services automatically
-- ✅ Handle micropayments (sub-cent transactions)
-- ✅ Manage USDC and ALGO balances
-- ✅ Swap tokens on Tinyman DEX
-- ✅ Create custom ASA tokens
-- ✅ Operate within configurable budget limits
+## How It Works
 
-## 🔧 What is x402?
+```mermaid
+sequenceDiagram
+    participant U as User / Agent
+    participant P as Pixa MCP
+    participant A as x402 API
+    participant C as Algorand Chain
 
-**x402** is an HTTP-native payment protocol that enables instant, on-chain micropayments for API access. It works by:
+    U->>P: Request resource (e.g. AI query, data fetch)
+    P->>A: HTTP GET /resource
+    A-->>P: 402 Payment Required (amount, recipient, network)
+    P->>P: Check budget limits
+    P->>C: Sign & broadcast USDC authorization
+    C-->>P: Transaction confirmed (< 4s)
+    P->>A: Retry with payment header
+    A-->>P: Resource returned
+    P-->>U: Result delivered
+```
 
-1. **Client requests a resource** → Server responds with `402 Payment Required`
-2. **Server includes payment terms** → Amount, recipient, network details
-3. **Agent signs payment authorization** → USDC transfer authorization on Algorand
-4. **Agent retries with payment header** → Server verifies and returns resource
+---
 
-This happens in seconds, with no human intervention, no API keys, and no pre-configured accounts.
+## Architecture
 
-### Why x402 + Algorand?
+```mermaid
+graph TD
+    subgraph Agent Layer
+        CL[Claude Desktop]
+        LG[LangChain / LangGraph]
+        CA[Custom Agents]
+    end
 
-- **Instant finality** - Algorand's 3.3s block time enables real-time payments
-- **Low fees** - ~$0.001 per transaction, perfect for micropayments
-- **Pure Proof of Stake** - Energy-efficient and sustainable
-- **Native USDC** - Circle's USDC is native to Algorand, no bridging needed
+    subgraph Pixa MCP Server
+        MCP[MCP Protocol Handler]
+        WM[Wallet Manager]
+        PM[Payment Engine x402]
+        BL[Budget Limiter]
+        SP[Spending Tracker]
+    end
 
-## 🚀 Features
+    subgraph Algorand Layer
+        SDK[AlgoSDK]
+        TM[Tinyman DEX]
+        NFD[NFD Name Resolver]
+        CHAIN[Algorand Mainnet]
+    end
 
-### Core Wallet Operations
-- **check_balance** - View USDC and ALGO balances
-- **transfer_usdc** - Send USDC to any Algorand address (supports NFD names)
-- **transfer_algo** - Send ALGO for gas fees
-- **spending_report** - Track spending history and budget usage
-- **request_funding** - Generate Algorand payment URIs for funding
+    subgraph External Services
+        BZ[Pixa Bazaar API Marketplace]
+        MX[Mudrex UPI Onramp]
+        UAL[Unified Agent Layer]
+    end
 
-### x402 Payment Protocol
-- **pay** - Sign x402 payment authorizations
-- **x402_fetch** - Fetch URLs with automatic x402 payment handling
-- **search_bazaar** - Discover x402-gated AI services
+    CL --> MCP
+    LG --> MCP
+    CA --> MCP
 
-### DeFi Integration
-- **tinyman_swap** - Swap tokens on Tinyman DEX
-- **create_token** - Create custom ASA tokens on Algorand
+    MCP --> WM
+    MCP --> PM
+    MCP --> BL
+    MCP --> SP
 
-## 📦 Installation Options
+    WM --> SDK
+    PM --> SDK
+    BL --> SP
 
-### For Non-Technical Users: .mcpb Extension
+    SDK --> TM
+    SDK --> NFD
+    SDK --> CHAIN
 
-Download and double-click `pixa.mcpb` - that's it! The extension installs automatically in Claude Desktop.
+    PM --> BZ
+    WM --> MX
+    PM --> UAL
+```
 
-**Download:** [Latest Release](https://github.com/soumyacodes007/algorand-wallet/releases/latest)
+---
 
-### For Technical Users: JSON Configuration
+## Autonomy Modes
 
-Add to your MCP config file:
+```mermaid
+graph LR
+    subgraph Mode 1: Full Autonomous
+        A1[Agent decides] --> A2[Budget check] --> A3[Pay & proceed]
+    end
+
+    subgraph Mode 2: Session Based
+        B1[User grants session] --> B2[Time + amount limit set] --> B3[Agent operates freely within session]
+    end
+
+    subgraph Mode 3: Human in the Loop
+        C1[Agent requests payment] --> C2[User approves in wallet] --> C3[Transaction executes]
+    end
+
+    style A1 fill:#e8f4fd
+    style B1 fill:#e8f4fd
+    style C1 fill:#e8f4fd
+```
+
+---
+
+## Payment Flow — UPI to Agent
+
+```mermaid
+flowchart LR
+    UPI[User pays via UPI] --> MX[Mudrex API]
+    MX --> USDC[USDC in Pixa Treasury]
+    USDC --> AGENT[Agent picks up balance]
+    AGENT --> API[Pays x402 gated API]
+    API --> RESULT[Returns result to user]
+
+    style UPI fill:#f0fdf4
+    style RESULT fill:#f0fdf4
+```
+
+---
+
+## Installation
+
+### Non-Technical Users — One Click
+
+Download the `.mcpb` extension and double-click. Pixa installs automatically into Claude Desktop. No terminal. No configuration files.
+
+**[Download Latest Release →](https://github.com/soumyacodes007/Pixa/releases/latest)**
+
+---
+
+### Developers — JSON Config
+
+Add to your Claude Desktop config file:
+
+**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`  
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -81,8 +161,8 @@ Add to your MCP config file:
       "command": "npx",
       "args": ["-y", "pixa-wallet-mcp"],
       "env": {
-        "ALGORAND_MNEMONIC": "your 25-word mnemonic",
-        "NETWORK": "algorand-testnet",
+        "ALGORAND_MNEMONIC": "your 25-word mnemonic here",
+        "NETWORK": "algorand-mainnet",
         "MAX_PER_CALL": "0.10",
         "MAX_PER_DAY": "20.00"
       }
@@ -91,151 +171,171 @@ Add to your MCP config file:
 }
 ```
 
-**Config locations:**
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+Restart Claude Desktop after saving.
 
-## 🏗️ Architecture
+---
 
-```
-┌─────────────────┐
-│   AI Agent      │
-│  (Claude, etc)  │
-└────────┬────────┘
-         │ MCP Protocol
-         ▼
-┌─────────────────┐
-│  PIXA Wallet    │
-│  MCP Server     │
-├─────────────────┤
-│ • Balance Check │
-│ • Transfers     │
-│ • x402 Payments │
-│ • DEX Swaps     │
-│ • Token Creation│
-└────────┬────────┘
-         │ Algorand SDK
-         ▼
-┌─────────────────┐
-│   Algorand      │
-│   Blockchain    │
-└─────────────────┘
+### Custom Agents — LangChain / LangGraph
+
+```python
+from langchain_mcp import MCPToolkit
+
+toolkit = MCPToolkit(
+    server_command="npx",
+    server_args=["-y", "pixa-wallet-mcp"],
+    env={
+        "ALGORAND_MNEMONIC": "your 25-word mnemonic",
+        "NETWORK": "algorand-mainnet",
+        "MAX_PER_CALL": "0.50",
+        "MAX_PER_DAY": "50.00"
+    }
+)
+
+tools = toolkit.get_tools()
 ```
 
-## 🔐 Security Features
+---
 
-- **Budget Limits** - Configurable max per call and daily spending caps
-- **Spending Tracking** - Complete audit trail of all transactions
-- **Secure Key Storage** - Mnemonics stored in OS keychain (for .mcpb)
-- **NFD Resolution** - Human-readable names instead of raw addresses
-- **Transaction Confirmation** - Wait for on-chain confirmation before proceeding
+## Environment Variables
 
-## 🎮 Try It Live
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ALGORAND_MNEMONIC` | Yes | — | 25-word Algorand wallet mnemonic |
+| `NETWORK` | No | `algorand-mainnet` | `algorand-mainnet` or `algorand-testnet` |
+| `MAX_PER_CALL` | No | `0.10` | Max USDC per single payment (USD) |
+| `MAX_PER_DAY` | No | `20.00` | Daily spending cap (USD) |
 
-Test PIXA with our Unified AI Layer endpoint:
+---
+
+## Tools Reference
+
+### Wallet Operations
+
+| Tool | Description |
+|---|---|
+| `check_balance` | View current USDC and ALGO balances |
+| `transfer_usdc` | Send USDC to any Algorand address or NFD name |
+| `transfer_algo` | Send ALGO for gas or transfers |
+| `spending_report` | Full audit trail — per-call and daily usage |
+| `request_funding` | Generate Algorand payment URI for top-up |
+
+### x402 Payment Protocol
+
+| Tool | Description |
+|---|---|
+| `pay` | Sign and broadcast x402 payment authorization |
+| `x402_fetch` | Fetch any URL with automatic 402 payment handling |
+| `search_bazaar` | Discover x402-gated AI services on Pixa Bazaar |
+
+### DeFi
+
+| Tool | Description |
+|---|---|
+| `tinyman_swap` | Swap tokens on Tinyman DEX |
+| `create_token` | Create custom ASA tokens on Algorand |
+
+---
+
+## Live Demo
+
+Test Pixa against the Unified Agent Layer endpoint:
 
 ```
 https://unified-agent-layer-production.up.railway.app/v1/chat
 ```
 
-**Ask your AI agent:**
-> "Access https://unified-agent-layer-production.up.railway.app/v1/chat and ask it to explain quantum computing"
+Ask your agent:
 
-The agent will:
-1. Detect the 402 payment requirement ($0.005)
-2. Sign a USDC payment authorization
-3. Retry with payment header
-4. Return the AI response
+> "Access https://unified-agent-layer-production.up.railway.app/v1/chat and explain quantum computing"
 
-## 🔮 Future Roadmap
+What happens:
 
-### 1. On-Ramp/Off-Ramp via Mudrex
-Enable agents to convert fiat ↔ crypto autonomously, removing the need for users to manually fund wallets.
+1. Agent detects the `402 Payment Required` response
+2. Pixa checks your budget limits
+3. Signs a USDC payment authorization on Algorand mainnet
+4. Transaction confirms in under 4 seconds
+5. Agent retries with payment header and returns the response
 
-### 2. Multi-Chain x402 Support
-Expand to Ethereum, Polygon, and other chains while keeping **Algorand as the settlement layer** for:
-- Final settlement of cross-chain transactions
-- Dispute resolution
-- Proof aggregation
+---
 
-### 3. Robust On-Chain Guardrails
-- Smart contract-based spending limits
-- Multi-sig requirements for large transactions
-- Time-locked payments
-- Whitelist/blacklist for recipient addresses
+## Security
 
-### 4. CLI Version
-Command-line interface for:
-- Server deployments
-- CI/CD integration
-- Headless agent environments
-- Advanced scripting and automation
+- **Budget limits** — configurable max per call and daily caps enforced before any transaction
+- **Three autonomy modes** — full autonomous, session-based, or human-in-the-loop
+- **Spending tracker** — complete on-chain audit trail of every payment
+- **NFD resolution** — human-readable names instead of raw wallet addresses
+- **Secure key storage** — mnemonics stored in OS keychain for `.mcpb` installs
+- **Transaction confirmation** — waits for on-chain finality before returning results
 
-## 🛠️ Technical Stack
+---
+
+## Why Algorand
+
+| | Algorand | EVM Chains |
+|---|---|---|
+| Block finality | ~3.3 seconds | 12s+ (probabilistic) |
+| Fee per transaction | < $0.001 | $0.50–$5.00+ |
+| Atomic transactions | Native | Smart contract workaround |
+| Native USDC | Yes (Circle) | Bridged |
+| Micropayment viability | Yes | No — gas exceeds payment value |
+
+---
+
+## Roadmap
+
+**Now — Live on Mainnet**
+- Full wallet operations, x402 payments, Tinyman DEX, NFD resolution
+- `.mcpb` one-click install for non-technical users
+- Budget controls and spending tracking
+
+**Next — UPI Onramp**
+- UPI-to-USDC widget via Mudrex API
+- Zero-friction India onboarding — pay like you order food, agent handles everything downstream
+
+**Future — Non-Custodial**
+- Smart contract-based treasury replacing backend custody
+- Multi-sig for large transactions
+- Time-locked payments and recipient whitelisting
+
+**Future — Multi-Chain**
+- Expand to additional chains while keeping Algorand as settlement layer
+- Cross-chain routing abstracted entirely from agent and user
+
+---
+
+## Tech Stack
 
 - **Language:** TypeScript
 - **Runtime:** Node.js 18+
 - **Protocol:** Model Context Protocol (MCP)
-- **Blockchain:** Algorand
-- **SDK:** AlgoSDK, @x402-avm
-- **Package Format:** .mcpb (MCP Bundle)
-
-## 📊 Use Cases
-
-### 1. Autonomous Research Agents
-Agents that need to access paid research databases, academic papers, or specialized APIs.
-
-### 2. Content Creation Agents
-AI agents that pay for image generation, video processing, or premium content APIs.
-
-### 3. Data Analysis Agents
-Agents that purchase real-time market data, weather data, or other premium datasets.
-
-### 4. Multi-Agent Collaboration
-Agents paying other agents for specialized services in a decentralized marketplace.
-
-## 🏆 Hackathon Highlights
-
-### Innovation
-- First full-featured Algorand wallet designed specifically for AI agents
-- Seamless integration of x402 protocol with MCP
-- Dual installation methods (technical and non-technical users)
-
-### Technical Excellence
-- 10 comprehensive tools covering wallet, DeFi, and payments
-- Built-in budget controls and spending tracking
-- NFD name resolution for user-friendly addresses
-- Tinyman DEX integration for token swaps
-
-### User Experience
-- One-click installation via .mcpb for non-technical users
-- Simple JSON config for developers
-- Automatic payment handling - agents "just work"
-- Real-time transaction confirmation
-
-### Algorand Integration
-- Native USDC support (no bridging)
-- Tinyman DEX integration
-- ASA token creation
-- NFD name resolution
-- Pure Proof of Stake benefits
-
-## 📝 License
-
-MIT License - See [LICENSE](LICENSE) for details
-
-## 🔗 Links
-
-- **Website:** [pixa-wallet.vercel.app](https://pixa-wallet.vercel.app)
-- **GitHub:** [github.com/soumyacodes007/algorand-wallet](https://github.com/soumyacodes007/algorand-wallet)
-- **Unified AI Layer:** [unified-agent-layer-production.up.railway.app](https://unified-agent-layer-production.up.railway.app)
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our contributing guidelines for more details.
+- **Blockchain:** Algorand Mainnet
+- **SDKs:** AlgoSDK, @x402-avm
+- **DeFi:** Tinyman DEX
+- **Identity:** NFD Name Resolution
+- **Package:** `.mcpb` (MCP Bundle)
 
 ---
 
-**Built with ❤️ for the Algorand ecosystem**
+## Network Status
 
-*Empowering AI agents to transact autonomously, one micropayment at a time.*
+| | |
+|---|---|
+| Network | Algorand Mainnet |
+| Smart Contract | N/A — MCP-based treasury wallet |
+| Treasury Explorer | [View on Allo](https://allo.info) |
+
+---
+
+## Contributing
+
+Pull requests welcome. For major changes, open an issue first.
+
+---
+
+## License
+
+MIT — see [LICENSE](./LICENSE)
+
+---
+
+Built for [AlgoBharat HackSeries 3.0](https://algobharat.in) · Agentic Commerce Track
